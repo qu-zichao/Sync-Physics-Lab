@@ -1,10 +1,31 @@
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 from dotenv import load_dotenv
 
+from transcribe.bibigpt import get_subtitle
+
 load_dotenv()
+
+
+def escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_timestamp(value: object) -> str:
+    if value is None:
+        return "00:00"
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "00:00"
+    if seconds > 10_000:
+        seconds /= 1000.0
+    seconds = max(0, int(seconds))
+    minutes = seconds // 60
+    remaining = seconds % 60
+    return f"{minutes:02d}:{remaining:02d}"
+
 
 st.set_page_config(page_title="Sync (同频) - Portal Lab", layout="centered")
 
@@ -28,8 +49,12 @@ st.title("Sync (同频) — Don't just watch physics. Play with it.")
 # --- 状态：是否进入实验室（第二空间） ---
 if "lab_mode" not in st.session_state:
     st.session_state.lab_mode = True  # 默认直接进入，符合你黑客松 demo 节奏
+if "subtitles" not in st.session_state:
+    st.session_state.subtitles = []
+if "subtitle_error" not in st.session_state:
+    st.session_state.subtitle_error = None
 
-col_a, col_b = st.columns([3, 1])
+col_a, col_b, col_c, col_d = st.columns([3, 1, 1, 1])
 with col_a:
     video_url = st.text_input(
         "视频链接（先用 YouTube/B站可访问链接；黑客松先跑通视觉）",
@@ -37,11 +62,87 @@ with col_a:
     )
 with col_b:
     st.session_state.lab_mode = st.toggle("进入实验室", value=st.session_state.lab_mode)
+with col_c:
+    audio_language = st.selectbox(
+        "字幕语言",
+        ["auto", "zh", "en", "ja", "ko"],
+        index=0,
+    )
+with col_d:
+    fetch_clicked = st.button("获取字幕")
+
+if fetch_clicked:
+    try:
+        subtitles = get_subtitle(video_url, audio_language)
+        if subtitles:
+            st.session_state.subtitles = subtitles
+            st.session_state.subtitle_error = None
+        else:
+            st.session_state.subtitles = []
+            st.session_state.subtitle_error = {
+                "message": "未找到字幕。",
+                "status_code": None,
+                "body_snippet": None,
+            }
+    except RuntimeError as exc:
+        st.session_state.subtitles = []
+        st.session_state.subtitle_error = {
+            "message": str(exc),
+            "status_code": getattr(exc, "status_code", None),
+            "body_snippet": getattr(exc, "body_snippet", None),
+        }
+
+subtitle_error = st.session_state.get("subtitle_error")
+if subtitle_error:
+    message = subtitle_error.get("message", "字幕获取失败")
+    status_code = subtitle_error.get("status_code")
+    body_snippet = subtitle_error.get("body_snippet")
+    details = []
+    if status_code is not None:
+        details.append(f"Status code: {status_code}")
+    if body_snippet is not None:
+        snippet = body_snippet if body_snippet else "(empty)"
+        details.append(f"Response snippet: {snippet}")
+    if details:
+        message = f"{message}\n\n" + "\n".join(details)
+    st.error(message)
 
 # --- 1) “视频入口 + 迷雾 + 实验室浮层”整体舞台 ---
 fog_opacity = 0.55 if st.session_state.lab_mode else 0.15
 panel_opacity = 1.0 if st.session_state.lab_mode else 0.0
 glow = "0 0 30px rgba(120,180,255,0.25)" if st.session_state.lab_mode else "none"
+
+subtitle_block_html = ""
+if st.session_state.lab_mode and st.session_state.subtitles:
+    lines = []
+    for entry in st.session_state.subtitles[:15]:
+        start_time = entry.get("startTime") or entry.get("start") or 0
+        text = escape_html(str(entry.get("text", "")).strip())
+        timestamp = format_timestamp(start_time)
+        if text:
+            lines.append(f"{timestamp} {text}")
+    if lines:
+        subtitle_lines_html = "<br/>".join(lines)
+        subtitle_block_html = f"""
+        <div style="
+          margin-top:12px;
+          background: rgba(10,14,28,0.45);
+          border: 1px solid rgba(255,255,255,0.10);
+          border-radius: 16px;
+          padding: 12px 14px;
+          box-shadow: 0 10px 35px rgba(0,0,0,0.30);
+          pointer-events:auto;
+        ">
+          <div style="font-size:13px; opacity:0.85;">SUBTITLES</div>
+          <div style="
+            margin-top:6px;
+            font-size:12px;
+            line-height:1.45;
+            max-height:180px;
+            overflow-y:auto;
+          ">{subtitle_lines_html}</div>
+        </div>
+        """
 
 stage_html = f"""
 <div style="position:relative; width:100%; max-width:980px; margin: 0 auto;">
@@ -111,6 +212,7 @@ stage_html = f"""
             • 下一步：接字幕 → 识别模型
           </div>
         </div>
+        {subtitle_block_html}
       </div>
     </div>
 
